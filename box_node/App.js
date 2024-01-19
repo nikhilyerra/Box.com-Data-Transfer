@@ -12,116 +12,111 @@ let session = box.getPreconfiguredInstance(configFile);
 let client = session.getAppAuthClient("enterprise");
 client._useIterators = true;
 
-const folderIds = ["243847804637", "223971544612"];
-// Add more folder IDs as needed
+// Get folder IDs from the command line arguments (excluding the first two arguments which are node and script file paths)
+const rootFolderIds = process.argv.slice(2);
 
-function downloadFilesFromFolders(folderId) {
-  let folderName;
-  let localFolderPath;
-
-  return client.folders
-    .get(folderId, null)
+function fetchFolderInfo(folderId, offset = 0, limit = 1000) {
+  return client.folders.get(folderId, { limit, offset })
     .then((folderInfo) => {
-      folderName = folderInfo.name;
+      return folderInfo;
+    });
+}
 
-      console.log("Folder Name:", folderName);
+function downloadFilesRecursively(folderId, localFolderPath) {
+  function downloadFiles(files) {
+    let downloadPromises = files.map((file) => {
+      return client.files.getReadStream(file.id, null).then((stream) => {
+        let output = fs.createWriteStream(path.join(localFolderPath, file.name));
+        stream.pipe(output);
+      });
+    });
 
-      return client.folders.getItems(folderId, { limit: 1000 });
-    })
-    .then((folderItemsIterator) => {
-      console.log("Retrieved folder items iterator");
-      return autoPage(folderItemsIterator);
-    })
-    .then((folderItems) => {
-      console.log("Retrieved folder items:", folderItems.length);
+    return Promise.all(downloadPromises);
+  }
 
-      let files = folderItems.filter((item) => {
-        return item.type === "file";
+  function fetchAllFolderItems(folderId) {
+    let allItems = [];
+
+    function fetchItemsBatch(offset) {
+      return fetchFolderInfo(folderId, offset, 1000)
+        .then((folderInfo) => {
+          let items = folderInfo.item_collection.entries;
+          allItems = allItems.concat(items);
+
+          if (items.length === 1000) {
+            return fetchItemsBatch(offset + 1000);
+          }
+        });
+    }
+
+    return fetchItemsBatch(0)
+      .then(() => allItems);
+  }
+
+  return fetchAllFolderItems(folderId)
+    .then((allItems) => {
+      let folders = allItems.filter((item) => item.type === "folder");
+      let files = allItems.filter((item) => item.type === "file");
+
+      console.log(`Downloading files from folder ID ${folderId}`);
+
+      // Download files in the current folder
+      let downloadFilesPromise = downloadFiles(files);
+
+      // Recursively download files from subfolders with their respective root folder
+      let subfolderPromises = folders.map((subfolder) => {
+        let subfolderLocalPath = path.join(localFolderPath, subfolder.name);
+        if (!fs.existsSync(subfolderLocalPath)) {
+          fs.mkdirSync(subfolderLocalPath);
+        } 
+
+        return downloadFilesRecursively(subfolder.id, subfolderLocalPath);
       });
 
-      console.log("Files in the folder:", files);
+      return Promise.all([downloadFilesPromise, ...subfolderPromises]);
+    });
+}
 
-      localFolderPath = createLocalFolder(folderName);
+// Function to handle API rate limit errors and retry after the specified time
+function handleRateLimitError(rootFolderId, retryAfter) {
+  console.log(`Rate limit exceeded for root folder ID ${rootFolderId}. Retrying after ${retryAfter} seconds.`);
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      resolve();
+    }, retryAfter * 1000);
+  });
+}
 
-      let downloadPromises = [];
+// Iterate through each root folder ID
+rootFolderIds.forEach((rootFolderId) => {
+  fetchFolderInfo(rootFolderId)
+    .then((rootFolderInfo) => {
+      // Create root local folder dynamically based on folder name
+      const localRootPath = path.join(__dirname, rootFolderInfo.name);
+      fs.mkdirSync(localRootPath);
 
-      files.forEach((file) => {
-        downloadPromises.push(
-          client.files.getReadStream(file.id, null).then((stream) => {
-            let output = fs.createWriteStream(
-              path.join(localFolderPath, file.name)
-            );
-            stream.pipe(output);
+      // Start downloading recursively with retry
+      const retryDownload = () => {
+        return downloadFilesRecursively(rootFolderId, localRootPath)
+          .then(() => {
+            console.log(`Download completed successfully for root folder ID ${rootFolderId}`);
           })
-        );
-      });
+          .catch((error) => {
+            if (error.statusCode === 429 && error.response.headers['retry-after']) {
+              // Retry after the specified time
+              const retryAfter = parseInt(error.response.headers['retry-after'], 10);
+              return handleRateLimitError(rootFolderId, retryAfter)
+                .then(() => retryDownload());
+            } else {
+              // Log other errors
+              console.error(`Error downloading files for root folder ID ${rootFolderId}:`, error);
+            }
+          });
+      };
 
-      return Promise.all(downloadPromises);
-    })
-    .then(() => {
-      console.log(`Downloaded all files from folder "${folderName}"`);
-      console.log(
-        `Files in local folder "${folderName}":`,
-        fs.readdirSync(localFolderPath)
-      );
+      return retryDownload();
     })
     .catch((error) => {
-      console.error("Error:", error);
+      console.error(`Error fetching root folder info for ID ${rootFolderId}:`, error);
     });
-}
-
-// Loop through all specified folder IDs
-folderIds.forEach((folderId) => {
-  downloadFilesFromFolders(folderId);
 });
-
-function createLocalFolder(folderName) {
-  let localFolderName = path.join(__dirname, folderName);
-
-  try {
-    fs.mkdirSync(localFolderName);
-    console.log("Local folder created:", localFolderName);
-  } catch (e) {
-    if (e.code === "EEXIST") {
-      console.log("Local folder already exists. Resetting...");
-      resetLocalFolder(localFolderName);
-      fs.mkdirSync(localFolderName);
-    } else {
-      console.error("Error creating local folder:", e);
-      throw e;
-    }
-  }
-
-  return localFolderName;
-}
-
-function resetLocalFolder(localFolderName) {
-  if (fs.existsSync(localFolderName)) {
-    console.log("Resetting local folder:", localFolderName);
-    fs.readdirSync(localFolderName).forEach((localFileName) => {
-      console.log("Removing file:", localFileName);
-      fs.unlinkSync(path.join(localFolderName, localFileName));
-    });
-    fs.rmdirSync(localFolderName);
-    console.log("Local folder reset complete");
-  }
-}
-
-function autoPage(iterator) {
-  let collection = [];
-
-  let moveToNextItem = () => {
-    return iterator.next().then((item) => {
-      if (item.value) {
-        collection.push(item.value);
-      }
-      if (item.done !== true) {
-        return moveToNextItem();
-      } else {
-        return collection;
-      }
-    });
-  };
-
-  return moveToNextItem();
-}

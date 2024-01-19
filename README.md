@@ -87,15 +87,13 @@ git clone https://github.com/nikhilyerra/Box.com-to-HiperGator-Data-Transfer-Aut
 ```
 - Navigate to box_node folder in the repo.
 ```
-cd box_node
+cd Box.com-to-HiperGator-Data-Transfer-Automation/box_node
 ```
 
 - Install dependencies:
 
-
 ```
 npm install
-npm install box-node-sdk --save
 ```
 
 # Usage
@@ -107,7 +105,7 @@ npm install box-node-sdk --save
 - Run the script using the following command:
 
 ```
-node your_script_name.js folder_id_1 folder_id_2 folder_id_3 ... folder_id_n
+node App.js folder_id_1 folder_id_2 folder_id_3 ... folder_id_n
 
 
 ```
